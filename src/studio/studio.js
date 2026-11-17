@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { jsPDF } from 'jspdf';
 import JSZip from 'jszip';
+import * as AI from '../lib/ai-config';
 
 let booted = false;
 export function boot(){
@@ -733,7 +734,7 @@ function storedKey(){ try { return localStorage.getItem('hf_anthropic_key')||'';
 function refreshAIStatus(){
   const info = state.aiInfo||{}; const key = storedKey(); const chip=$('aiChip'), banner=$('aiBanner');
   if (info.configured){ chip.textContent='AI ready'; chip.className='chip ok'; banner.hidden=true; $('keyInfo').textContent='This site already has a server key, so you do not need your own. A key saved here is only used if the server key is removed.'; }
-  else if (key){ chip.textContent='AI ready (your key)'; chip.className='chip ok'; banner.hidden=true; $('keyInfo').textContent='Using the key saved in this browser.'; }
+  else if (key){ chip.textContent='AI ready (your key)'; chip.className='chip ok'; banner.hidden=true; $('keyInfo').textContent='Using the key saved in this browser. Requests go straight from this browser to the Anthropic API.'; }
   else { chip.textContent='Add API key'; chip.className='chip warn'; banner.hidden=false; banner.className='banner warn'; banner.textContent='Photo analysis, suggestions, redesign and the prompt box use Claude. Add an Anthropic API key with the API key button to turn them on. The sample house, plan, toggles and exports work without one.'; $('keyInfo').textContent='No server key is set for this site. Paste your own key from console.anthropic.com.'; }
 }
 async function initAI(){
@@ -756,7 +757,37 @@ function parseLooseJSON(text){
   if (a!==Infinity && b>a){ try { return JSON.parse(t.slice(a,b+1)); } catch(e){} }
   throw {code:'invalid_json', message:'No JSON in the answer', text};
 }
+function blobToBase64(b){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(b); }); }
+async function callAIDirect(prompt, opts, key){
+  // Browser -> Anthropic API with the viewer's own key: no server time limit on long analyses.
+  const { default: Anthropic } = await import('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+  const imgs = opts.images ? (Array.isArray(opts.images) ? opts.images : [opts.images]) : [];
+  const content = [];
+  for (const [i,b] of imgs.entries()){ const type = AI.IMAGE_TYPES.includes(b.type) ? b.type : 'image/jpeg'; content.push({type:'text', text:'Photo '+(i+1)+':'}); content.push({type:'image', source:{type:'base64', media_type:type, data: await blobToBase64(b)}}); }
+  content.push({type:'text', text: prompt});
+  const task = opts.modelTier==='complex' ? 'analyze' : 'edit';
+  let text='';
+  try {
+    const stream = client.beta.messages.stream({ model: AI.MODEL, max_tokens: 64000, betas:['server-side-fallback-2026-07-01'], fallbacks:'default', output_config:{effort: AI.effortFor(task)}, system: AI.SYSTEM, messages:[{role:'user', content}] }, { signal: opts.signal });
+    stream.on('text', (_d, snap)=>{ text = snap; if (opts.onText && snap.trim()) opts.onText({text: snap}); });
+    const msg = await stream.finalMessage();
+    if (msg.stop_reason==='refusal') throw {code:'refused'};
+    if (msg.stop_reason==='max_tokens') throw {code:'invalid_json', message:'The answer was cut short.', text};
+  } catch(e){
+    if (e && e.code) throw e;
+    if (e instanceof Anthropic.APIUserAbortError || (e && e.name==='AbortError')) throw {code:'cancelled'};
+    if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) throw {code:'auth'};
+    if (e instanceof Anthropic.RateLimitError) throw {code:'rate_limited'};
+    if (e instanceof Anthropic.BadRequestError) throw {code:'bad_request', message:e.message};
+    throw {code:'upstream_error', message:String(e && e.message || e), text};
+  }
+  if (!text.trim()) throw {code:'empty_completion'};
+  return parseLooseJSON(text);
+}
 async function callAI(prompt, opts){
+  const ownKey = storedKey();
+  if (ownKey && !(state.aiInfo && state.aiInfo.configured)) return callAIDirect(prompt, opts, ownKey);
   const fd = new FormData(); fd.append('prompt', prompt); fd.append('task', opts.modelTier==='complex' ? 'analyze' : 'edit');
   const imgs = opts.images ? (Array.isArray(opts.images) ? opts.images : [opts.images]) : [];
   imgs.forEach((b,i)=>fd.append('images', b, 'photo'+(i+1)+'.'+((b.type||'image/jpeg').split('/')[1]||'jpg')));

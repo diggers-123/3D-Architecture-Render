@@ -1,16 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-// Photo analysis on the most capable tier can think for a while before writing.
-export const maxDuration = 300;
+import { MODEL, MAX_IMAGES, IMAGE_TYPES, SYSTEM, effortFor } from "@/lib/ai-config";
 
-const MODEL = "claude-opus-5-5";
-const MAX_IMAGES = 10;
-const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"] as const;
+// Used only when ANTHROPIC_API_KEY is set on the server. Temporary and Hobby deployments cap
+// functions at 60 s, so long photo analyses run from the browser with the viewer's own key instead.
+export const maxDuration = 60;
+
 type ImageType = (typeof IMAGE_TYPES)[number];
-
-const SYSTEM =
-  "You are the modelling engine of HouseForge, an app that turns photographs of a home into a measured 3D model and a technical floor plan. " +
-  "You estimate real dimensions from standard reference sizes (doors, windows, counters, furniture) and you always answer with exactly the JSON the user turn asks for, with no prose before or after it.";
 
 // Marks an error that happens after text has started streaming. The client splits on it.
 const ERROR_MARK = "\n[[HF_ERROR]]";
@@ -78,7 +74,7 @@ export async function POST(request: Request) {
           max_tokens: 64000,
           betas: ["server-side-fallback-2026-07-01"],
           fallbacks: "default",
-          output_config: { effort: task === "analyze" ? "high" : "medium" },
+          output_config: { effort: effortFor(task) },
           system: SYSTEM,
           messages: [{ role: "user", content }],
         },
